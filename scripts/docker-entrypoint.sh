@@ -45,11 +45,15 @@ validate_environment() {
 }
 
 # Ensure container is not run as root for security
+# This check verifies that privilege dropping worked correctly
 check_not_root() {
   if [ "$(id -u)" = "0" ]; then
     log "ERROR: This container should not be run as root"
+    log "       If you're using PUID/PGID, ensure the init-user.sh script ran correctly"
+    log "       Current user: $(id)"
     return 1
   fi
+  log "Running as user: $(id -un) (UID=$(id -u), GID=$(id -g))"
   return 0
 }
 
@@ -187,6 +191,7 @@ check_database_connectivity() {
   local db_name="${PHPBB_DATABASE_NAME:-phpbb}"
   local db_port="${PHPBB_DATABASE_PORT:-}"
   local db_path="${PHPBB_DATABASE_SQLITE_PATH:-${PHPBB_ROOT}/phpbb.sqlite}"
+  local db_tls="${PHPBB_DATABASE_TLS:-false}"
   local result=0
   
   log "Checking database connectivity..."
@@ -201,7 +206,16 @@ check_database_connectivity() {
       # Try connecting to MySQL with appropriate arguments
       if command -v mysql >/dev/null 2>&1; then
         log "Testing MySQL connection to $db_host..."
-        if ! mysql -h "$db_host" ${db_port:+-P "$db_port"} -u "$db_user" ${db_pass:+-p"$db_pass"} -e "SELECT 1" >/dev/null 2>&1; then
+        
+        # Build MySQL SSL/TLS options
+        local mysql_ssl_opts=""
+        if [ "$db_tls" = "true" ] || [ "$db_tls" = "1" ]; then
+          mysql_ssl_opts="--ssl-mode=REQUIRED"
+        else
+          mysql_ssl_opts="--ssl-mode=DISABLED"
+        fi
+        
+        if ! mysql -h "$db_host" ${db_port:+-P "$db_port"} -u "$db_user" ${db_pass:+-p"$db_pass"} $mysql_ssl_opts -e "SELECT 1" >/dev/null 2>&1; then
           log "WARNING: Could not connect to MySQL server at $db_host. phpBB may not function correctly!"
           result=0  # Don't fail the container, just warn
         else
@@ -221,7 +235,16 @@ check_database_connectivity() {
       # Try connecting to PostgreSQL with appropriate arguments
       if command -v psql >/dev/null 2>&1; then
         log "Testing PostgreSQL connection to $db_host..."
-        if ! PGPASSWORD="$db_pass" psql -h "$db_host" ${db_port:+-p "$db_port"} -U "$db_user" -d "$db_name" -c "SELECT 1" >/dev/null 2>&1; then
+        
+        # Set PostgreSQL SSL mode based on PHPBB_DATABASE_TLS
+        local pg_sslmode=""
+        if [ "$db_tls" = "true" ] || [ "$db_tls" = "1" ]; then
+          pg_sslmode="require"
+        else
+          pg_sslmode="disable"
+        fi
+        
+        if ! PGPASSWORD="$db_pass" PGSSLMODE="$pg_sslmode" psql -h "$db_host" ${db_port:+-p "$db_port"} -U "$db_user" -d "$db_name" -c "SELECT 1" >/dev/null 2>&1; then
           log "WARNING: Could not connect to PostgreSQL server at $db_host. phpBB may not function correctly!"
           result=0  # Don't fail the container, just warn
         else

@@ -6,6 +6,11 @@ ENV PHP_VERSION="${PHP_VERSION/./}"
 ENV PHPBB_ROOT="/opt/phpbb"
 ENV PHPBB_VERSION="${PHPBB_VERSION}"
 
+# PUID/PGID environment variables for Linux permission handling
+# These allow the container to run with custom UID/GID matching the host user
+ENV PUID="" \
+    PGID=""
+
 # phpBB configuration environment variables
 ENV PHPBB_FORUM_NAME="My phpBB Forum" \
     PHPBB_FORUM_DESCRIPTION="A phpBB Forum" \
@@ -22,6 +27,7 @@ ENV PHPBB_FORUM_NAME="My phpBB Forum" \
     PHPBB_DATABASE_USERNAME="" \
     PHPBB_DATABASE_PASSWORD="" \
     PHPBB_DATABASE_PASS="" \
+    PHPBB_DATABASE_TLS="false" \
     SMTP_HOST="" \
     SMTP_PORT="25" \
     SMTP_USER="" \
@@ -35,9 +41,10 @@ ENV PHPBB_FORUM_NAME="My phpBB Forum" \
     PHP_MEMORY_LIMIT="128M" \
     PHP_CUSTOM_INI=""
 
-# Create non-root user for running the application
-RUN addgroup -S phpbb && \
-    adduser -S -G phpbb -H -h ${PHPBB_ROOT} phpbb && \
+# Create non-root user for running the application with default UID/GID
+# These will be modified at runtime if PUID/PGID are set
+RUN addgroup -g 1000 -S phpbb && \
+    adduser -u 1000 -S -G phpbb -H -h ${PHPBB_ROOT} phpbb && \
     mkdir -p ${PHPBB_ROOT} /opt/.docker && \
     chown -R phpbb:phpbb ${PHPBB_ROOT}
 
@@ -77,6 +84,7 @@ RUN apk update && \
     php${PHP_VERSION}-intl \
     php${PHP_VERSION}-pecl-imagick && \
     # Install web server, tools, and database clients (needed for runtime)
+    # su-exec is used for secure privilege dropping (like gosu but smaller)
     apk add --no-cache \
     nginx \
     curl \
@@ -85,7 +93,9 @@ RUN apk update && \
     ca-certificates \
     mysql-client \
     postgresql-client \
-    sqlite && \
+    sqlite \
+    shadow \
+    su-exec && \
     # Cleanup to reduce layer size
     rm -rf /var/cache/apk/*
 
@@ -121,7 +131,7 @@ RUN sed -i "s/user = nobody/user = phpbb/g" /etc/php${PHP_VERSION}/php-fpm.d/www
     chown phpbb:phpbb /run/nginx.pid
 
 # Copy scripts and configurations
-COPY scripts/install-phpbb.sh scripts/docker-entrypoint.sh scripts/install-from-yml.sh /opt/.docker/
+COPY scripts/install-phpbb.sh scripts/docker-entrypoint.sh scripts/install-from-yml.sh scripts/init-user.sh /opt/.docker/
 COPY config/nginx.conf /etc/nginx/http.d/default.conf
 
 # Download and install phpBB during the build
@@ -186,8 +196,10 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/ || exit 1
 
-# Switch to non-root user for running the container
-USER phpbb
-
-ENTRYPOINT ["/opt/.docker/docker-entrypoint.sh"]
+# Container starts as root to handle PUID/PGID changes, then drops to non-root user
+# The init-user.sh script validates and applies UID/GID changes securely,
+# then uses su-exec to drop privileges before running the main entrypoint
+# This maintains the "runs as non-root" security claim as the application
+# processes (nginx, php-fpm) always run as the unprivileged phpbb user
+ENTRYPOINT ["/opt/.docker/init-user.sh"]
 CMD ["nginx", "-g", "daemon off;"]

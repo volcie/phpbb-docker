@@ -43,20 +43,20 @@ validate_db_config() {
         export PHPBB_DATABASE_SQLITE_PATH="${PHPBB_ROOT}/phpbb.sqlite"
         log "Setting default SQLite database path to ${PHPBB_DATABASE_SQLITE_PATH}"
       fi
-      
+
       # Check if the database is in the public directory using proper path comparison
       if [ -n "${PHPBB_DATABASE_SQLITE_PATH:-}" ]; then
         # Get directory part of the SQLite path
         db_dir=$(dirname "${PHPBB_DATABASE_SQLITE_PATH}")
         public_dir="${PHPBB_ROOT}/phpbb"
-        
+
         # Compare actual directory paths instead of using string replacement
         if [ "$db_dir" = "$public_dir" ]; then
           log "ERROR: SQLite database cannot be stored in the public phpBB directory (${PHPBB_ROOT}/phpbb)"
           log "       Please use a path outside the web root, such as ${PHPBB_ROOT}/phpbb.sqlite"
           return 1
         fi
-        
+
         # Check SQLite directory permission
         if [ ! -d "$db_dir" ]; then
           log "Creating SQLite database directory: $db_dir"
@@ -65,7 +65,7 @@ validate_db_config() {
             return 1
           }
         fi
-        
+
         # Ensure directory is writable
         if [ ! -w "$db_dir" ]; then
           log "ERROR: SQLite database directory is not writable: $db_dir"
@@ -87,39 +87,53 @@ test_db_connection() {
   local pass="${PHPBB_DATABASE_PASSWORD:-${PHPBB_DATABASE_PASS:-}}"
   local name="${PHPBB_DATABASE_NAME:-phpbb}"
   local db_path="${PHPBB_DATABASE_SQLITE_PATH:-/phpbb.sqlite}"
-  
+  local use_tls="${PHPBB_DATABASE_TLS:-false}"
+
   log "Testing database connection with driver: $driver"
-  
+
   case "$driver" in
     mysqli)
       # Set default MySQL port if not specified
       [ -z "$port" ] && port="3306"
-      
+
       if command -v mysql > /dev/null 2>&1; then
         log "Testing MySQL connection to $host:$port..."
-        if ! mysql -h "$host" -P "$port" -u "$user" ${pass:+-p"$pass"} -e "SELECT 1" > /dev/null 2>&1; then
+
+        # Build MySQL SSL/TLS options
+        # --ssl-mode is the modern option (MySQL 5.7.11+), fallback to legacy options
+        local mysql_ssl_opts=""
+        if [ "$use_tls" = "true" ] || [ "$use_tls" = "1" ]; then
+          # Use ssl-mode=REQUIRED to enforce TLS connection
+          mysql_ssl_opts="--ssl"
+          log "Using TLS/SSL for MySQL connection (ssl-mode=REQUIRED)"
+        else
+          # Explicitly disable SSL when TLS is not requested
+          mysql_ssl_opts="--skip-ssl"
+        fi
+
+        if ! mysql -h "$host" -P "$port" -u "$user" ${pass:+-p"$pass"} $mysql_ssl_opts -e "SELECT 1" > /dev/null 2>&1; then
           log "ERROR: Failed to connect to MySQL database"
           return 1
         fi
-        
+
         # Test if database exists or we can create it
-        if ! mysql -h "$host" -P "$port" -u "$user" ${pass:+-p"$pass"} -e "USE \`$name\`" > /dev/null 2>&1; then
+        if ! mysql -h "$host" -P "$port" -u "$user" ${pass:+-p"$pass"} $mysql_ssl_opts -e "USE \`$name\`" > /dev/null 2>&1; then
           log "Database '$name' doesn't exist, will be created during installation"
         fi
-        
+
         log "MySQL connection successful"
       else
         log "WARNING: mysql client not found, skipping connection test"
       fi
       ;;
-      
+
     postgres)
       # Set default PostgreSQL port if not specified
       [ -z "$port" ] && port="5432"
-      
+
       if command -v psql > /dev/null 2>&1; then
         log "Testing PostgreSQL connection to $host:$port..."
-        
+
         # Create temporary pgpass file to avoid password prompt
         if [ -n "$pass" ]; then
           PGPASS_FILE="${TEMP_DIR}/pgpass"
@@ -127,29 +141,41 @@ test_db_connection() {
           chmod 600 "$PGPASS_FILE"
           export PGPASSFILE="$PGPASS_FILE"
         fi
-        
+
+        # Set PostgreSQL SSL mode based on PHPBB_DATABASE_TLS
+        local pg_sslmode=""
+        if [ "$use_tls" = "true" ] || [ "$use_tls" = "1" ]; then
+          pg_sslmode="require"
+          log "Using TLS/SSL for PostgreSQL connection (sslmode=require)"
+        else
+          pg_sslmode="disable"
+        fi
+        export PGSSLMODE="$pg_sslmode"
+
         if ! PGCONNECT_TIMEOUT=10 psql -h "$host" -p "$port" -U "$user" -c "SELECT 1" postgres > /dev/null 2>&1; then
           log "ERROR: Failed to connect to PostgreSQL database"
           [ -n "${PGPASSFILE:-}" ] && unset PGPASSFILE
+          unset PGSSLMODE
           return 1
         fi
-        
+
         # Test if database exists
         if ! PGCONNECT_TIMEOUT=10 psql -h "$host" -p "$port" -U "$user" -c "SELECT 1" "$name" > /dev/null 2>&1; then
           log "Database '$name' doesn't exist, will be created during installation"
         fi
-        
+
         [ -n "${PGPASSFILE:-}" ] && unset PGPASSFILE
+        unset PGSSLMODE
         log "PostgreSQL connection successful"
       else
         log "WARNING: psql client not found, skipping connection test"
       fi
       ;;
-      
+
     sqlite3)
       if command -v sqlite3 > /dev/null 2>&1; then
         log "Testing SQLite database at $db_path"
-        
+
         # For SQLite, just check if we can access or create the file
         db_dir=$(dirname "$db_path")
         if [ ! -d "$db_dir" ]; then
@@ -159,7 +185,7 @@ test_db_connection() {
             return 1
           }
         fi
-        
+
         # Test if we can write to the database
         if [ -f "$db_path" ] && [ ! -w "$db_path" ]; then
           log "ERROR: SQLite database file exists but is not writable: $db_path"
@@ -168,20 +194,20 @@ test_db_connection() {
           log "ERROR: SQLite database directory is not writable: $db_dir"
           return 1
         fi
-        
+
         # Test if we can open/create the database
         if ! echo "SELECT 1;" | sqlite3 "$db_path" > /dev/null 2>&1; then
           log "ERROR: Failed to access or create SQLite database: $db_path"
           return 1
         fi
-        
+
         log "SQLite database test successful"
       else
         log "WARNING: sqlite3 client not found, skipping connection test"
       fi
       ;;
   esac
-  
+
   return 0
 }
 
@@ -289,7 +315,7 @@ fi
 
 # Only remove install directory if installation was successful
 if [ $RESULT -eq 0 ] && [ -d "install" ]; then
-  rm -rf "install" 
+  rm -rf "install"
   log "SECURITY: Removed install dir after successful installation"
 fi
 

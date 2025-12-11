@@ -132,6 +132,7 @@ The following environment variables can be used to configure the phpBB installat
 | `PHPBB_DATABASE_PASSWORD` or `PHPBB_DATABASE_PASS` | Database password                                                | ""                        |
 | `PHPBB_DATABASE_SQLITE_PATH`                       | Full path for SQLite database file (used when driver is sqlite3) | "/opt/phpbb/phpbb.sqlite" |
 | `PHPBB_TABLE_PREFIX`                               | Prefix for database tables                                       | "phpbb\_"                 |
+| `PHPBB_DATABASE_TLS`                               | Enable TLS/SSL for database connection (true/false)              | "false"                   |
 
 ### Email / SMTP
 
@@ -161,6 +162,74 @@ The following environment variables can be used to configure the phpBB installat
 | ------------------ | ------------------------------------------ | ------- |
 | `PHP_MEMORY_LIMIT` | PHP memory limit                           | "128M"  |
 | `PHP_CUSTOM_INI`   | Custom PHP.ini directives (multiple lines) | ""      |
+
+### User/Group ID Configuration (Linux Permission Handling)
+
+| Variable | Description                      | Default |
+| -------- | -------------------------------- | ------- |
+| `PUID`   | User ID to run the container as  | 1000    |
+| `PGID`   | Group ID to run the container as | 1000    |
+
+## Linux File Permissions (PUID/PGID)
+
+When running Docker on Linux, you may encounter file permission issues when mounting volumes. This
+happens because files created in the container are owned by the container's user (default UID 1000),
+which may not match your host user.
+
+### The Problem
+
+```bash
+# Files in mounted volumes may be owned by a different user
+ls -la /path/to/phpbb_data
+# drwxr-xr-x 2 1000 1000 4096 Jan 1 00:00 files
+# You can't edit these files as your regular user!
+```
+
+### The Solution: PUID and PGID
+
+Set the `PUID` and `PGID` environment variables to match your host user:
+
+```bash
+# Find your user's UID and GID
+id
+# uid=1000(youruser) gid=1000(yourgroup) ...
+
+# Run the container with matching UID/GID
+docker run -d \
+  -p 8080:8080 \
+  -v phpbb_data:/opt/phpbb \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e PHPBB_FORUM_NAME="My Forum" \
+  evandarwin/phpbb:latest
+```
+
+### Security Notes
+
+- **Non-root execution is maintained**: The container temporarily runs as root only during startup
+  to modify UID/GID, then immediately drops privileges using `su-exec`. All application processes
+  (nginx, PHP-FPM) run as the unprivileged `phpbb` user.
+- **UID/GID 0 is blocked**: The container will refuse to run if you set `PUID=0` or `PGID=0`
+- **Recommended range**: Use UIDs/GIDs between 100-60000 to avoid conflicts with system users
+- **Rootless Docker**: If running rootless Docker or with `--user`, PUID/PGID settings will be
+  ignored with a warning (changes require root privileges at startup)
+
+### Docker Compose Example with PUID/PGID
+
+```yaml
+services:
+  phpbb:
+    image: evandarwin/phpbb:latest
+    ports:
+      - '8080:8080'
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - PHPBB_FORUM_NAME=My Forum
+      - PHPBB_DATABASE_DRIVER=sqlite3
+    volumes:
+      - ./phpbb_data:/opt/phpbb
+```
 
 ## Data Persistence
 
@@ -442,13 +511,11 @@ Storing SQLite database files in publicly accessible locations presents severe s
 #### Recommendations
 
 1. Store your SQLite database in a directory that is:
-
    - NOT accessible from the web
    - NOT inside the `/opt/phpbb` public directory structure
    - Properly permission-restricted
 
 2. When using the `PHPBB_DATABASE_SQLITE_PATH` environment variable:
-
    - Use a path like `/var/lib/phpbb/data/phpbb.sqlite3`
    - NEVER use a path within the phpBB root directory
    - The container is configured to reject SQLite paths that contain the phpBB root directory
@@ -489,18 +556,17 @@ Kubernetes, or Docker Compose with health checks.
 ### Common Issues and Solutions
 
 1. **Database Connection Errors**:
-
    - Double-check your database credentials and connection settings
    - Verify network connectivity between containers
    - For MySQL, ensure the user has proper privileges
 
 2. **Permission Issues**:
-
-   - If mounting volumes, ensure they have the correct ownership and permissions
-   - The container uses a non-root user with UID/GID different from the host
+   - If mounting volumes on Linux, use `PUID` and `PGID` environment variables to match your host
+     user (see [Linux File Permissions](#linux-file-permissions-puidpgid) section)
+   - Find your UID/GID with the `id` command and set them in your container configuration
+   - The container uses a non-root user - files will be owned by the UID/GID you specify
 
 3. **PHP Configuration**:
-
    - If you need to adjust PHP settings beyond what's available through environment variables, you
      can mount a custom php.ini file
 
