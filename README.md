@@ -451,7 +451,22 @@ postgres:
     start_period: 30s
 ```
 
-## Using Behind a Reverse Proxy
+## Using Behind a Reverse Proxy or Cloudflare
+
+This container automatically detects the real client IP address when running behind a reverse proxy
+or Cloudflare. The IP detection follows this priority:
+
+1. `CF-Connecting-IP` header (Cloudflare)
+2. `X-Real-IP` header (generic proxy)
+3. `X-Forwarded-For` header (first IP in the chain)
+4. Direct connection IP (`$remote_addr`)
+
+No additional configuration is required - it works out of the box.
+
+> **Security Warning**: The container trusts these headers from any source. If your container is
+> directly exposed to the internet (not behind Cloudflare or a reverse proxy), a malicious client
+> could spoof their IP address by sending fake headers. To prevent this, ensure that only your
+> proxy/Cloudflare can reach the container by using firewall rules or Docker network isolation.
 
 When using this container behind a reverse proxy like Traefik or Nginx:
 
